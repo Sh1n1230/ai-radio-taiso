@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ラジオ体操（PoC）</title>
+<style>
+html,body{margin:0;height:100%;background:#cfe8f7;font-family:"Hiragino Kaku Gothic ProN","Noto Sans JP","Yu Gothic",sans-serif;overflow:hidden}
+svg{position:fixed;inset:0;width:100%;height:100%}
+#count{position:fixed;top:7%;left:0;right:0;text-align:center;font-size:clamp(28px,7vw,60px);font-weight:700;color:#2b3a55;opacity:0;transition:opacity .25s;pointer-events:none}
+#count.on{opacity:1;transition:none}
+#caption{position:fixed;bottom:5%;left:50%;transform:translateX(-50%);max-width:90%;background:rgba(255,255,255,.88);padding:.45em 1em;border-radius:8px;font-size:clamp(16px,3vw,24px);color:#222;text-align:center}
+#caption:empty{display:none}
+#hud{position:fixed;top:12px;left:14px;font-size:14px;color:#2b3a55}
+#ctrl{position:fixed;top:10px;right:10px;display:flex;gap:6px}
+button{font:inherit;border:1px solid #2b3a55;background:#fff;color:#2b3a55;border-radius:6px;padding:4px 10px;cursor:pointer}
+.overlay{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(207,232,247,.94);gap:18px;color:#2b3a55}
+.overlay h1{margin:0;font-size:clamp(28px,6vw,46px)}
+.overlay button{font-size:22px;padding:10px 30px}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+<svg id="svg" viewBox="0 0 400 500" preserveAspectRatio="xMidYMid meet">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9fd0f0"/><stop offset="1" stop-color="#eef7fc"/>
+    </linearGradient>
+  </defs>
+  <rect x="-400" y="-200" width="1200" height="900" fill="url(#sky)"/>
+  <circle id="sun" cx="320" cy="110" r="26" fill="#ffd860"/>
+  <rect x="-400" y="430" width="1200" height="300" fill="#bfe0a8"/>
+  <line x1="-400" y1="430" x2="800" y2="430" stroke="#8fbf74" stroke-width="2"/>
+  <g id="shadow" opacity="0.16" transform="translate(0,430) scale(1,-0.3) translate(0,-430)"></g>
+  <g id="fig"></g>
+</svg>
+<div id="count"></div>
+<div id="caption"></div>
+<div id="hud"></div>
+<div id="ctrl" class="hidden">
+  <button id="btnMute">音 ON</button>
+  <button id="btnVoice">読み上げ ON</button>
+  <button id="btnRestart">最初から</button>
+</div>
+<div id="title" class="overlay">
+  <h1>ラジオ体操</h1>
+  <button id="btnStart">はじめる</button>
+</div>
+<div id="end" class="overlay hidden">
+  <button id="btnAgain">もう一度</button>
+</div>
+<script>
+"use strict";
+// ---------- 基本設定 ----------
+const BPM = 126, SPB = 60 / BPM;
+const G = 430;               // 地面の y
+const TH = 62, SH = 62;      // 太もも・すね
+const TORSO = 92, ARM = 96, HEAD_R = 21;
+const COUNT = ["いち","に","さん","し","ご","ろく","しち","はち"];
+const rad = d => d * Math.PI / 180;
+const ease = x => 0.5 - 0.5 * Math.cos(Math.PI * Math.max(0, Math.min(1, x)));
+const lerp = (a, b, t) => a + (b - a) * t;
+
+const REST = {aL:8,aR:8,fL:1,fR:1,side:0,pitch:0,twist:0,thigh:6,kneeL:0,kneeR:0,
+  jump:0,heel:0,armOffY:0,headX:0,headTurn:0,shadowSide:null};
+const P = o => Object.assign({}, REST, o);
+function lerpPose(a, b, t){
+  const o = {};
+  for (const k in REST){
+    if (k === "shadowSide") { o[k] = t < 1 ? a[k] : b[k]; continue; }
+    o[k] = lerp(a[k], b[k], t);
+  }
+  return o;
+}
+
+// ---------- 運動の定義 ----------
+// pose(b): b は 0〜16 拍．counts は 16 拍ぶんの表示（null は無表示）．
+const std = () => COUNT.concat(COUNT);
+const MOVES = [
+  { name:"背伸び", line:"腕を前から上にあげて，大きく背伸びの運動から。", counts:std(),
+    pose(b){
+      const rep = Math.floor(b / 4), u = b % 4;
+      let a, f, heel;
+      if (u < 2){ const t = ease(u / 2); a = lerp(8, 178, t); f = 1 - 0.65 * Math.sin(Math.PI * t); heel = 8 * t; }
+      else { const t = ease((u - 2) / 2); a = lerp(178, 8, t); f = 1; heel = 8 * (1 - t); }
+      let armOffY = 0;
+      // 3回目だけ，下ろす拍で腕が上に置き去りになり，次の拍で何事もなく戻る
+      if (rep === 2 && u >= 2){
+        if (u < 3.5){ a = 178; f = 1; armOffY = 14 * ease((u - 2) / 0.6); }
+        else { a = 8; armOffY = 0; }
+      }
+      return P({aL:a, aR:a, fL:f, fR:f, heel, armOffY});
+    } },
+  { name:"腕を振って足をまげる", line:"腕を振って，足をまげる運動。", counts:std(),
+    pose(b){
+      const k = 0.55 * Math.abs(Math.sin(Math.PI * b));
+      const a = 20 + 70 * Math.abs(Math.sin(Math.PI * b / 2));
+      // 8回目だけ左膝が逆に曲がる
+      const kneeL = (b >= 7 && b < 8) ? -k : k;
+      return P({aL:a, aR:a, kneeL, kneeR:k});
+    } },
+  { name:"腕をまわす", line:"腕をまわします。", counts:std(),
+    pose(b){
+      const base = 8 + 180 * b;               // 2拍で1周
+      let aL = base, aR = base;
+      // 最後は左腕だけ先に止まり，右腕は1周多く回ってから止まる
+      if (b >= 14) aL = 8;
+      return P({aL, aR});
+    } },
+  { name:"胸の運動", line:"胸の運動です。腕を横に開きます。", counts:std(),
+    pose(b){
+      const u = b % 4; let a, f = 1, pitch = 0;
+      if (u < 1){ const t = ease(u); a = lerp(8, 85, t); f = lerp(1, 0.35, t); }
+      else if (u < 2){ const t = ease(u - 1); a = lerp(85, 100, t); f = lerp(0.35, 1, t); pitch = -0.25 * t; }
+      else { const t = ease((u - 2) / 2); a = lerp(100, 8, t); pitch = -0.25 * (1 - t); }
+      // 5拍目から頭が半個ぶん左にずれたまま
+      const headX = b >= 5 ? -HEAD_R : 0;
+      return P({aL:a, aR:a, fL:f, fR:f, pitch, headX});
+    } },
+  { name:"横曲げ", line:"横曲げの運動。", counts:std(),
+    pose(b){
+      const rep = Math.floor(b / 4), u = b % 4;
+      const dir = rep % 2 === 0 ? 1 : -1;
+      const s = Math.sin(Math.PI * u / 2);
+      const side = 24 * dir * Math.abs(s);
+      const aL = dir > 0 ? lerp(8, 165, Math.abs(s)) : 35;
+      const aR = dir < 0 ? lerp(8, 165, Math.abs(s)) : 35;
+      // 後半は影だけ反対側に曲がる
+      const shadowSide = b >= 8 ? -side : null;
+      return P({aL, aR, side, shadowSide});
+    } },
+  { name:"前後に曲げる", line:"前後に曲げる運動です。",
+    counts: COUNT.concat(["いち","に","さん","し","ご","ろく","しち","しち"]),
+    pose(b){
+      const rep = Math.floor(b / 4), u = b % 4; let pitch, a;
+      if (u < 2){ pitch = 0.9 * Math.abs(Math.sin(Math.PI * u)) + 0.1 * (u > 0.5 ? 1 : 0) * Math.sin(Math.PI * u / 2); a = 5; }
+      else { const back = rep === 3 ? -1.25 : -0.7; pitch = back * Math.sin(Math.PI * (u - 2) / 2); a = 30; }
+      return P({aL:a, aR:a, pitch, thigh:12});
+    } },
+  { name:"ねじる", line:"体をねじる運動。", counts:std(),
+    pose(b){
+      const tw = Math.sin(Math.PI * b / 2);
+      const a = 70 + 20 * Math.abs(tw);
+      // 13拍目以降，体は戻るのに顔だけ横を向いたまま
+      const headTurn = b >= 13 ? 1 : tw;
+      return P({aL:a + 20 * tw, aR:a - 20 * tw, twist:tw, headTurn, thigh:12});
+    } },
+  { name:"腕を上下にのばす", line:"次は首の運動です。", counts:std(),
+    pose(b){
+      const u = b % 4;
+      const keys = [[8,1],[150,0.45],[178,1],[150,0.45],[8,1]];
+      const i = Math.floor(u), t = ease(u - i);
+      const a = lerp(keys[i][0], keys[i + 1][0], t), f = lerp(keys[i][1], keys[i + 1][1], t);
+      return P({aL:a, aR:a, fL:f, fR:f, thigh:10});
+    } },
+  { name:"両足でとぶ", line:"両足でとぶ運動。", counts:std(),
+    pose(b){
+      let frac, h = 18;
+      // 1回だけ着地が半拍遅れる
+      if (b >= 10 && b < 11.5){ frac = (b - 10) / 1.5; }
+      else if (b >= 11.5 && b < 12){ frac = (b - 11.5) / 0.5; h = 8; }
+      else frac = b % 1;
+      const jump = h * Math.sin(Math.PI * frac);
+      const open = Math.floor(b) % 2 === 1;
+      return P({jump, thigh: open ? 16 : 5, aL: open ? 60 : 12, aR: open ? 60 : 12});
+    } },
+  { name:"深呼吸", line:"深呼吸です。大きく息を吸って，吐いて，吸って。", counts:std(),
+    pose(b){
+      const rep = Math.floor(b / 4), u = b % 4; let a;
+      if (u < 2) a = lerp(8, 175, ease(u / 2));
+      else a = rep === 3 ? 175 : lerp(175, 8, ease((u - 2) / 2));   // 最後だけ吐かない
+      return P({aL:a, aR:a, heel: u < 2 ? 4 * ease(u / 2) : (rep === 3 ? 4 : 4 * (1 - ease((u - 2) / 2)))});
+    } },
+];
+
+// ---------- タイムライン ----------
+const ANN = 8, EX = 16;
+const segs = [];
+let cur = 0;
+segs.push({type:"intro", start:cur, len:8, line:"おはようございます。ラジオ体操です。"}); cur += 8;
+MOVES.forEach((m, i) => {
+  segs.push({type:"ann", start:cur, len:ANN, line:m.line, i}); cur += ANN;
+  segs.push({type:"ex", start:cur, len:EX, i}); cur += EX;
+});
+segs.push({type:"outro", start:cur, len:10, line:"これで体操を終わります。"}); cur += 10;
+const TOTAL = cur;
+
+function poseAt(beat){
+  const s = segs.find(s => beat >= s.start && beat < s.start + s.len) || segs[segs.length - 1];
+  const b = beat - s.start;
+  if (s.type === "intro") return {s, b, pose:P({})};
+  if (s.type === "ex") return {s, b, pose:MOVES[s.i].pose(b)};
+  if (s.type === "ann"){
+    const prev = s.i === 0 ? P({}) : MOVES[s.i - 1].pose(16 - 1e-6);
+    return {s, b, pose:lerpPose(prev, REST, ease(b / 2))};
+  }
+  return {s, b, pose:MOVES[MOVES.length - 1].pose(16 - 1e-6)};  // outro: 深呼吸の最後のまま
+}
+
+// ---------- 描画 ----------
+const NS = "http://www.w3.org/2000/svg";
+function mkFigure(root, color){
+  const el = {};
+  const line = (k, w) => { const e = document.createElementNS(NS, "line");
+    e.setAttribute("stroke", color); e.setAttribute("stroke-width", w); e.setAttribute("stroke-linecap", "round"); root.appendChild(e); el[k] = e; };
+  ["thL","shL","thR","shR"].forEach(k => line(k, 13));
+  ["ftL","ftR"].forEach(k => line(k, 9));
+  line("torso", 22); line("neck", 10);
+  ["armL","armR"].forEach(k => line(k, 12));
+  const head = document.createElementNS(NS, "circle"); head.setAttribute("r", HEAD_R); head.setAttribute("fill", color); root.appendChild(head); el.head = head;
+  ["eyeL","eyeR"].forEach(k => { const e = document.createElementNS(NS, "circle"); e.setAttribute("r", 2.6); e.setAttribute("fill", "#fff"); root.appendChild(e); el[k] = e; });
+  return el;
+}
+const setL = (e, a, b) => { e.setAttribute("x1", a[0]); e.setAttribute("y1", a[1]); e.setAttribute("x2", b[0]); e.setAttribute("y2", b[1]); };
+const add = (a, b) => [a[0] + b[0], a[1] + b[1]];
+function rot(v, d){ const r = rad(d), c = Math.cos(r), s = Math.sin(r); return [v[0] * c - v[1] * s, v[0] * s + v[1] * c]; }
+
+function draw(el, p){
+  function leg(side, k){
+    const ta = p.thigh + 22 * k, sa = p.thigh - 22 * k;
+    const tv = [side * Math.sin(rad(ta)) * TH, Math.cos(rad(ta)) * TH];
+    const sv = [side * Math.sin(rad(sa)) * SH, Math.cos(rad(sa)) * SH];
+    return {tv, sv, h: tv[1] + sv[1]};
+  }
+  const L = leg(-1, p.kneeL), R = leg(1, p.kneeR);
+  const hip = [200, G - Math.max(L.h, R.h) - p.jump - p.heel];
+  const hipL = add(hip, [-14, 0]), hipR = add(hip, [14, 0]);
+  const kL = add(hipL, L.tv), fL = add(kL, L.sv), kR = add(hipR, R.tv), fR = add(kR, R.sv);
+  setL(el.thL, hipL, kL); setL(el.shL, kL, fL); setL(el.thR, hipR, kR); setL(el.shR, kR, fR);
+  setL(el.ftL, fL, add(fL, [-10, 0])); setL(el.ftR, fR, add(fR, [10, 0]));
+
+  const tl = TORSO * (p.pitch >= 0 ? 1 - 0.5 * p.pitch : 1 + 0.25 * p.pitch);
+  const neck = add(hip, rot([p.twist * 4, -tl], p.side));
+  setL(el.torso, add(hip, rot([0, -8], p.side)), neck);
+  const headC = add(add(neck, rot([0, -26 - HEAD_R * 0.3], p.side)), [p.headX, p.pitch > 0 ? p.pitch * 8 : 0]);
+  setL(el.neck, neck, headC);
+  el.head.setAttribute("cx", headC[0]); el.head.setAttribute("cy", headC[1]);
+  const ey = headC[1] - 2 + p.pitch * 7, ex = p.headTurn * 10;
+  el.eyeL.setAttribute("cx", headC[0] + ex - 7); el.eyeL.setAttribute("cy", ey);
+  el.eyeR.setAttribute("cx", headC[0] + ex + 7); el.eyeR.setAttribute("cy", ey);
+  const vis = Math.abs(p.headTurn) > 0.85 ? (p.headTurn > 0 ? [0.25, 1] : [1, 0.25]) : [1, 1];
+  el.eyeL.setAttribute("opacity", vis[0]); el.eyeR.setAttribute("opacity", vis[1]);
+
+  const w = 30 * (1 - 0.45 * Math.abs(p.twist));
+  const sL = add(add(neck, rot([-w, 8], p.side)), [0, -p.armOffY]);
+  const sR = add(add(neck, rot([w, 8], p.side)), [0, -p.armOffY]);
+  const dL = rot([-Math.sin(rad(p.aL)), Math.cos(rad(p.aL))], p.side);
+  const dR = rot([Math.sin(rad(p.aR)), Math.cos(rad(p.aR))], p.side);
+  setL(el.armL, sL, add(sL, [dL[0] * ARM * p.fL, dL[1] * ARM * p.fL]));
+  setL(el.armR, sR, add(sR, [dR[0] * ARM * p.fR, dR[1] * ARM * p.fR]));
+}
+
+const fig = mkFigure(document.getElementById("fig"), "#2b3a55");
+const shd = mkFigure(document.getElementById("shadow"), "#1d2a1a");
+const $ = id => document.getElementById(id);
+
+// ---------- 音 ----------
+let ctx = null, master = null, t0 = 0, nextBeat = 0, running = false, muted = false, voice = true;
+const midi = n => 440 * Math.pow(2, (n - 69) / 12);
+const PROG = ["C","C","F","C","G","G","C","C"];
+const CH = {C:[60,64,67], F:[60,65,69], G:[59,62,67]}, BASS = {C:48, F:41, G:43};
+const MEL = [[72,76],[79,76],[77,76],[74,72],[77,81],[84,81],[79,76],[72,0],
+             [74,79],[83,79],[74,77],[79,77],[76,74],[72,76],[72,0],[0,0]];
+function tone(n, time, dur, type, vol){
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.type = type; o.frequency.value = midi(n);
+  g.gain.setValueAtTime(0, time); g.gain.linearRampToValueAtTime(vol, time + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0005, time + dur);
+  o.connect(g); g.connect(master); o.start(time); o.stop(time + dur + 0.05);
+}
+function schedule(){
+  while (nextBeat < TOTAL - 2 && t0 + nextBeat * SPB < ctx.currentTime + 0.3){
+    const time = t0 + nextBeat * SPB, ch = PROG[Math.floor(nextBeat / 2) % 8];
+    tone(BASS[ch] + (nextBeat % 2 ? 7 : 0), time, 0.32, "triangle", 0.32);
+    CH[ch].forEach(n => tone(n, time + SPB / 2, 0.16, "triangle", 0.07));
+    MEL[nextBeat % 16].forEach((n, i) => { if (n) tone(n, time + i * SPB / 2, 0.2, "triangle", 0.12); });
+    nextBeat++;
+  }
+}
+function say(text){
+  if (!voice || muted || !("speechSynthesis" in window)) return;
+  try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text); u.lang = "ja-JP"; u.rate = 1.05; speechSynthesis.speak(u); } catch (e) {}
+}
+
+// ---------- ループ ----------
+let lastSeg = null, lastInt = -1;
+function frame(){
+  if (!running) return;
+  schedule();
+  const beat = (ctx.currentTime - t0) / SPB;
+  if (beat >= TOTAL){ running = false; $("end").classList.remove("hidden"); return; }
+  const bb = Math.max(0, beat);
+  const {s, b, pose} = poseAt(bb);
+  draw(fig, pose);
+  draw(shd, pose.shadowSide === null ? pose : Object.assign({}, pose, {side: pose.shadowSide}));
+  $("sun").setAttribute("cy", s.type === "intro" ? lerp(380, 110, ease(b / 6)) : 110);
+
+  if (s !== lastSeg){
+    lastSeg = s; lastInt = -1;
+    $("caption").textContent = s.line || "";
+    if (s.line) say(s.line);
+    $("hud").textContent = s.i !== undefined ? `${s.i + 1}/${MOVES.length}` : "";
+  }
+  const bi = Math.floor(b);
+  if (beat >= 0 && bi !== lastInt){
+    lastInt = bi;
+    let word = null;
+    if (s.type === "ex") word = MOVES[s.i].counts[bi];
+    if (s.type === "ann" && bi === ANN - 1) word = "はい";
+    if (s.type === "ex" && bi === 2) $("caption").textContent = "";
+    const c = $("count");
+    if (word){ c.textContent = word; c.classList.add("on"); requestAnimationFrame(() => requestAnimationFrame(() => c.classList.remove("on"))); }
+  }
+  requestAnimationFrame(frame);
+}
+function start(){
+  if (!ctx){ ctx = new (window.AudioContext || window.webkitAudioContext)(); master = ctx.createGain(); master.connect(ctx.destination); }
+  ctx.resume();
+  master.gain.value = muted ? 0 : 0.9;
+  t0 = ctx.currentTime + 0.2; nextBeat = 0; lastSeg = null; lastInt = -1; running = true;
+  $("title").classList.add("hidden"); $("end").classList.add("hidden"); $("ctrl").classList.remove("hidden");
+  requestAnimationFrame(frame);
+}
+$("btnStart").onclick = start;
+$("btnAgain").onclick = start;
+$("btnRestart").onclick = () => { running = false; try { speechSynthesis.cancel(); } catch (e) {} setTimeout(start, 50); };
+$("btnMute").onclick = () => { muted = !muted; if (master) master.gain.value = muted ? 0 : 0.9; $("btnMute").textContent = muted ? "音 OFF" : "音 ON"; if (muted) try { speechSynthesis.cancel(); } catch (e) {} };
+$("btnVoice").onclick = () => { voice = !voice; $("btnVoice").textContent = voice ? "読み上げ ON" : "読み上げ OFF"; if (!voice) try { speechSynthesis.cancel(); } catch (e) {} };
+draw(fig, P({})); draw(shd, P({}));
+</script>
+</body>
+</html>
